@@ -1,0 +1,17 @@
+build/
+cmake-build-*/
+out/
+.vs/
+.vscode/
+.idea/
+*.user
+*.o
+*.obj
+*.a
+*.lib
+*.exe
+*.out
+*.bmi
+*.pcm
+compile_commands.json
+.DS_Store

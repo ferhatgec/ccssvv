@@ -1,0 +1,60 @@
+---
+WarningsAsErrors: 'bugprone-*,performance-*,concurrency-*,clang-analyzer-*'
+HeaderFilterRegex: '.*'
+ExcludeHeaderFilterRegex: '(^|[/\\])(lib|libs|build|_deps|third_party|external|vcpkg_installed)[/\\]'
+FormatStyle: file
+
+Checks: >
+  -*,
+  bugprone-*,
+  -bugprone-easily-swappable-parameters,
+  -bugprone-unchecked-optional-access,
+  clang-analyzer-*,
+  concurrency-*,
+  cert-*,
+  cppcoreguidelines-*,
+  -cppcoreguidelines-avoid-magic-numbers,
+  -cppcoreguidelines-macro-usage,
+  -cppcoreguidelines-pro-bounds-pointer-arithmetic,
+  -cppcoreguidelines-pro-bounds-array-to-pointer-decay,
+  -cppcoreguidelines-pro-type-reinterpret-cast,
+  -cppcoreguidelines-pro-type-vararg,
+  -cppcoreguidelines-owning-memory,
+  -cppcoreguidelines-special-member-functions,
+  -cppcoreguidelines-non-private-member-variables-in-classes,
+  -cppcoreguidelines-pro-bounds-constant-array-index,
+  misc-*,
+  -misc-non-private-member-variables-in-classes,
+  -misc-include-cleaner,
+  -misc-const-correctness,
+  modernize-*,
+  -modernize-macro-to-enum,
+  -modernize-return-braced-init-list,
+  performance-*,
+  readability-*,
+  -readability-magic-numbers,
+  -readability-identifier-length,
+  -readability-implicit-bool-conversion,
+  -readability-else-after-return,
+  -readability-braces-around-statements,
+  -readability-function-cognitive-complexity,
+  -readability-convert-member-functions-to-static,
+  -readability-avoid-const-params-in-decls
+
+CheckOptions:
+  bugprone-dangling-handle.HandleClasses: 'std::basic_string_view;std::span'
+  modernize-use-auto.MinTypeNameLength: 5
+  modernize-use-std-format.StrictMode: true
+  modernize-use-std-numbers.StrictMode: true
+  modernize-use-nodiscard.ReplacementString: '[[nodiscard]]'
+  performance-move-const-arg.CheckTriviallyCopyableMove: true
+  performance-unnecessary-value-param.AllowedTypes: 'std::unique_ptr;std::shared_ptr;std::string_view;std::span'
+  readability-identifier-naming.ClassCase: CamelCase
+  readability-identifier-naming.StructCase: CamelCase
+  readability-identifier-naming.VariableCase: lower_case
+  readability-identifier-naming.FunctionCase: lower_case
+  readability-identifier-naming.PrivateMemberSuffix: '_'
+  readability-identifier-naming.PrivateMemberCase: lower_case
+  readability-identifier-naming.GlobalConstantCase: UPPER_CASE
+  readability-identifier-naming.MacroDefinitionCase: UPPER_CASE
+...

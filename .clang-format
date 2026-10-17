@@ -1,0 +1,23 @@
+BasedOnStyle: Chromium
+IndentWidth: 2
+MaxEmptyLinesToKeep: 1
+TabWidth: 2
+UseTab: Never
+SpaceBeforeParens: Never
+QualifierAlignment: Right
+SpacesBeforeTrailingComments: 1
+
+ContinuationIndentWidth: 2
+AlignAfterOpenBracket: true
+BinPackArguments: false
+BinPackParameters: false
+AllowAllArgumentsOnNextLine: true
+AllowAllParametersOfDeclarationOnNextLine: true
+
+BreakAfterOpenBracketFunction: true
+BreakBeforeCloseBracketFunction: true
+BreakAfterOpenBracketIf: true
+BreakBeforeCloseBracketIf: true
+BreakAfterOpenBracketLoop: true
+BreakBeforeCloseBracketLoop: true
+IndentPPDirectives: AfterHash
