@@ -3,6 +3,10 @@
 //
 module;
 
+#ifdef __AVX2__
+#  include <immintrin.h>
+#endif
+
 export module csv;
 
 import std;
@@ -24,7 +28,7 @@ enum class ErrorCode : std::uint8_t {
   column_out_of_range,
 };
 
-[[nodiscard]] inline auto describe(ErrorCode code) noexcept
+[[nodiscard]] constexpr auto describe(ErrorCode code) noexcept
   -> std::string_view {
   switch(code) {
     case ErrorCode::invalid_dialect:
@@ -121,4 +125,206 @@ concept Scanner =
     { scanner.find_quote(text, from) } noexcept -> std::same_as<std::size_t>;
   };
 
+} // namespace csv
+
+namespace csv::detail {
+
+inline constexpr std::uint64_t lane_ones = 0x0101010101010101ULL;
+inline constexpr std::uint64_t lane_low7 = 0x7F7F7F7F7F7F7F7FULL;
+
+namespace {
+[[nodiscard]] constexpr auto broadcast(char c) noexcept -> std::uint64_t {
+  return lane_ones * static_cast<std::uint8_t>(c);
+}
+
+[[nodiscard]] constexpr auto zero_lanes(std::uint64_t v) noexcept
+  -> std::uint64_t {
+  return ~(((v & lane_low7) + lane_low7) | v | lane_low7);
+}
+
+[[nodiscard]] constexpr auto first_lane(std::uint64_t mask) noexcept
+  -> std::size_t {
+  if constexpr(std::endian::native == std::endian::little) {
+    return static_cast<std::size_t>(std::countr_zero(mask)) / 8;
+  } else {
+    return static_cast<std::size_t>(std::countl_zero(mask)) / 8;
+  }
+}
+
+// only meaningful for Dialect::strict_text.
+[[nodiscard]] auto find_non_text(std::string_view text, bool quoted) noexcept
+  -> std::size_t {
+  auto const* const data = text.data();
+  auto const size = text.size();
+  auto i = std::size_t{0};
+
+#ifdef __AVX2__
+  if(i + 32 <= size) {
+    auto const min_printable = _mm256_set1_epi8(0x20); // ascii 0x20 = space
+    auto const del_char = _mm256_set1_epi8(0x7F);
+    auto const cr_char = _mm256_set1_epi8('\r');
+    auto const lf_char = _mm256_set1_epi8('\n');
+
+    do {
+      auto const block =
+        _mm256_loadu_si256(reinterpret_cast<__m256i const*>(data + i));
+      // signed comparison: bytes < 0x20 (0x00..0x1F) and >= 0x80 (-128..-1)
+      // are all strictly less than 0x20 (32) in two's complement int8_t.
+      auto bad = _mm256_or_si256(
+        _mm256_cmpgt_epi8(min_printable, block),
+        _mm256_cmpeq_epi8(block, del_char)
+      );
+      if(quoted) {
+        auto const allowed_crlf = _mm256_or_si256(
+          _mm256_cmpeq_epi8(block, cr_char), _mm256_cmpeq_epi8(block, lf_char)
+        );
+        bad = _mm256_andnot_si256(allowed_crlf, bad);
+      }
+      if(
+        auto const mask = static_cast<std::uint32_t>(_mm256_movemask_epi8(bad));
+        mask != 0
+      ) {
+        return i + static_cast<std::size_t>(std::countr_zero(mask));
+      }
+      i += 32;
+    } while(i + 32 <= size);
+  }
+#endif
+
+  for(; i < size; ++i) {
+    auto const c = data[i];
+    auto const byte = static_cast<unsigned char>(c);
+    auto const ok =
+      (byte >= 0x20 && byte <= 0x7E) || (quoted && (c == '\r' || c == '\n'));
+    if(!ok) {
+      return i;
+    }
+  }
+  return npos;
+}
+} // namespace
+} // namespace csv::detail
+
+export namespace csv {
+
+// portable 8-bytes-per-step scanner.
+class SwarScanner {
+ public:
+  constexpr explicit SwarScanner(Dialect const& dialect) noexcept
+      : delimiter_{dialect.delimiter},
+        quote_{dialect.quote},
+        lanes_{detail::broadcast(dialect.delimiter),
+               detail::broadcast(dialect.quote),
+               detail::broadcast('\r'),
+               detail::broadcast('\n')} {}
+
+  [[nodiscard]] auto find_structural(
+    std::string_view text, std::size_t from
+  ) const noexcept -> std::size_t {
+    auto const* const data = text.data();
+    auto const size = text.size();
+    auto i = from;
+    for(; i + sizeof(std::uint64_t) <= size; i += sizeof(std::uint64_t)) {
+      std::uint64_t word{};
+      std::memcpy(&word, data + i, sizeof word);
+      auto const hits = detail::zero_lanes(word ^ lanes_[0]) |
+                        detail::zero_lanes(word ^ lanes_[1]) |
+                        detail::zero_lanes(word ^ lanes_[2]) |
+                        detail::zero_lanes(word ^ lanes_[3]);
+      if(hits != 0) {
+        return i + detail::first_lane(hits);
+      }
+    }
+    for(; i < size; ++i) {
+      if(is_structural(data[i])) {
+        return i;
+      }
+    }
+    return npos;
+  }
+
+  [[nodiscard]] auto find_quote(
+    std::string_view text, std::size_t from
+  ) const noexcept -> std::size_t {
+    return text.find(quote_, from);
+  }
+
+ private:
+  [[nodiscard]] constexpr auto is_structural(char c) const noexcept -> bool {
+    return c == delimiter_ || c == quote_ || c == '\r' || c == '\n';
+  }
+
+  char delimiter_{};
+  char quote_{};
+  std::array<std::uint64_t, 4> lanes_{};
+};
+
+#ifdef __AVX2__
+
+// 32 bytes per step.
+// the sub-32-byte tail falls back to SwarScanner so it never reads past "text"
+class Avx2Scanner {
+ public:
+  explicit Avx2Scanner(Dialect const& dialect) noexcept
+      : quote_{dialect.quote},
+        delimiter_vec_{_mm256_set1_epi8(dialect.delimiter)},
+        quote_vec_{_mm256_set1_epi8(dialect.quote)},
+        cr_vec_{_mm256_set1_epi8('\r')},
+        lf_vec_{_mm256_set1_epi8('\n')},
+        tail_{dialect} {}
+
+  [[nodiscard]] auto find_structural(
+    std::string_view text, std::size_t from
+  ) const noexcept -> std::size_t {
+    auto const* const data = text.data();
+    auto const size = text.size();
+    auto i = from;
+    if(i + 32 <= size) {
+      do {
+        auto const block =
+          _mm256_loadu_si256(reinterpret_cast<__m256i const*>(data + i));
+        auto const hits = _mm256_or_si256(
+          _mm256_or_si256(
+            _mm256_cmpeq_epi8(block, delimiter_vec_),
+            _mm256_cmpeq_epi8(block, quote_vec_)
+          ),
+          _mm256_or_si256(
+            _mm256_cmpeq_epi8(block, cr_vec_), _mm256_cmpeq_epi8(block, lf_vec_)
+          )
+        );
+        auto const mask =
+          static_cast<std::uint32_t>(_mm256_movemask_epi8(hits));
+        if(mask != 0) {
+          return i + static_cast<std::size_t>(std::countr_zero(mask));
+        }
+        i += 32;
+      } while(i + 32 <= size);
+    }
+    return tail_.find_structural(text, i);
+  }
+
+  // libc's memchr is already vectorised and runtime-dispatched.
+  [[nodiscard]] auto find_quote(
+    std::string_view text, std::size_t from
+  ) const noexcept -> std::size_t {
+    return text.find(quote_, from);
+  }
+
+ private:
+  char quote_{};
+  __m256i delimiter_vec_{};
+  __m256i quote_vec_{};
+  __m256i cr_vec_{};
+  __m256i lf_vec_{};
+  SwarScanner tail_;
+};
+
+using DefaultScanner = Avx2Scanner;
+
+#else
+using DefaultScanner = SwarScanner;
+#endif
+
+static_assert(Scanner<SwarScanner>);
+static_assert(Scanner<DefaultScanner>);
 } // namespace csv
