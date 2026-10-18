@@ -14,9 +14,9 @@ else ()
   set(CMAKE_EXPERIMENTAL_CXX_IMPORT_STD "0e5b6991-d74f-4b3d-a41c-cf096e0b2508")
 endif ()
 
-project(csv
+project(ccssvv
   VERSION 1.0.0
-  DESCRIPTION "C++23 CSV parser"
+  DESCRIPTION "CSV parser module written in C++23"
   LANGUAGES CXX
 )
 
@@ -24,19 +24,19 @@ option(CSV_BUILD_EXAMPLES "Build example code" ${PROJECT_IS_TOP_LEVEL})
 option(CSV_ENABLE_AVX2 "AVX2" ON)
 option(CSV_ENABLE_NATIVE "-march=native" OFF)
 
-add_library(csv STATIC)
-add_library(csv::csv ALIAS csv)
+add_library(ccssvv STATIC)
+add_library(ccssvv::ccssvv ALIAS ccssvv)
 
-target_compile_features(csv PUBLIC cxx_std_23)
+target_compile_features(ccssvv PUBLIC cxx_std_23)
 
-set_target_properties(csv PROPERTIES
+set_target_properties(ccssvv PROPERTIES
   CXX_STANDARD 23
   CXX_STANDARD_REQUIRED ON
   CXX_EXTENSIONS OFF
   CXX_MODULE_STD ON
 )
 
-target_sources(csv
+target_sources(ccssvv
   PUBLIC
   FILE_SET CXX_MODULES
   BASE_DIRS ${CMAKE_CURRENT_SOURCE_DIR}
@@ -46,31 +46,31 @@ target_sources(csv
 
 if (CSV_ENABLE_NATIVE)
   if (MSVC)
-    target_compile_options(csv PUBLIC /arch:AVX2)
+    target_compile_options(ccssvv PUBLIC /arch:AVX2)
   else ()
-    target_compile_options(csv PUBLIC -march=native)
+    target_compile_options(ccssvv PUBLIC -march=native)
   endif ()
 elseif (CSV_ENABLE_AVX2)
   if (MSVC)
-    target_compile_options(csv PUBLIC /arch:AVX2)
+    target_compile_options(ccssvv PUBLIC /arch:AVX2)
   elseif (CMAKE_SYSTEM_PROCESSOR MATCHES "(x86)|(X86)|(amd64)|(AMD64)")
-    target_compile_options(csv PUBLIC -mavx2 -mbmi)
+    target_compile_options(ccssvv PUBLIC -mavx2 -mbmi)
   endif ()
 endif ()
 
 if (MSVC)
-  target_compile_options(csv PRIVATE /W4 /permissive-)
+  target_compile_options(ccssvv PRIVATE /W4 /permissive-)
 else ()
-  target_compile_options(csv PRIVATE -Wall -Wextra -Wpedantic -Wconversion)
+  target_compile_options(ccssvv PRIVATE -Wall -Wextra -Wpedantic -Wconversion)
 endif ()
 
 if (CSV_BUILD_EXAMPLES)
-  add_executable(csv_example example.cpp)
-  set_target_properties(csv_example PROPERTIES
+  add_executable(ccssvv_example example.cpp)
+  set_target_properties(ccssvv_example PROPERTIES
     CXX_STANDARD 23
     CXX_STANDARD_REQUIRED ON
     CXX_EXTENSIONS OFF
     CXX_MODULE_STD ON
   )
-  target_link_libraries(csv_example PRIVATE csv::csv)
+  target_link_libraries(ccssvv_example PRIVATE ccssvv::ccssvv)
 endif ()

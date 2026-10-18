@@ -1,4 +1,4 @@
-import csv;
+import ccssvv;
 import std;
 
 namespace {
@@ -10,8 +10,9 @@ constexpr std::string_view sample =
   "3,Linus,\r\n";
 
 auto walk_records() -> void {
+  using namespace ccssvv;
   std::string scratch;
-  for(auto const& item : csv::parse(sample, csv::Dialect::rfc4180())) {
+  for(auto const& item : parse(sample, Dialect::rfc4180())) {
     if(!item) {
       std::println("error: {}", item.error().message());
       return;
@@ -24,9 +25,8 @@ auto walk_records() -> void {
 }
 
 auto read_columns() -> void {
-  auto table = csv::Table<csv::ViewSource>::open(
-    csv::ViewSource{sample}, csv::Dialect::rfc4180()
-  );
+  using namespace ccssvv;
+  auto table = Table<ViewSource>::open(ViewSource{sample}, Dialect::rfc4180());
   if(!table) {
     std::println("error: {}", table.error().message());
     return;
@@ -44,7 +44,8 @@ auto read_columns() -> void {
 }
 
 auto sum_file_column(std::filesystem::path const& path) -> void {
-  auto table = csv::open_table(path, csv::Dialect::rfc4180());
+  using namespace ccssvv;
+  auto table = open_table(path, Dialect::rfc4180());
   if(!table) {
     std::println("error: {}", table.error().message());
     return;

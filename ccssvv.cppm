@@ -8,23 +8,23 @@ module;
 #  include <sys/mman.h>
 #  include <sys/stat.h>
 #  include <unistd.h>
-#  define CSV_HAS_MMAP 1
+#  define CCSSVV_HAS_MMAP 1
 #elifdef _WIN32
 #  define WIN32_LEAN_AND_MEAN
 #  define NOMINMAX
 #  include <windows.h>
-#  define CSV_HAS_MMAP 1
+#  define CCSSVV_HAS_MMAP 1
 #endif
 
 #ifdef __AVX2__
 #  include <immintrin.h>
 #endif
 
-export module csv;
+export module ccssvv;
 
 import std;
 
-export namespace csv {
+export namespace ccssvv {
 
 enum class ErrorCode : std::uint8_t {
   InvalidDialect,
@@ -138,9 +138,9 @@ concept Scanner =
     { scanner.find_quote(text, from) } noexcept -> std::same_as<std::size_t>;
   };
 
-} // namespace csv
+} // namespace ccssvv
 
-namespace csv::detail {
+namespace ccssvv::detail {
 
 inline constexpr std::uint64_t lane_ones = 0x0101010101010101ULL;
 inline constexpr std::uint64_t lane_low7 = 0x7F7F7F7F7F7F7F7FULL;
@@ -169,7 +169,7 @@ inline constexpr std::uint64_t lane_low7 = 0x7F7F7F7F7F7F7F7FULL;
 ) noexcept -> std::size_t {
   auto const* const data = text.data();
   auto const size = text.size();
-  auto i {0UZ};
+  auto i{0UZ};
 
 #ifdef __AVX2__
   if(i + 32 <= size) {
@@ -216,9 +216,9 @@ inline constexpr std::uint64_t lane_low7 = 0x7F7F7F7F7F7F7F7FULL;
   return npos;
 }
 
-} // namespace csv::detail
+} // namespace ccssvv::detail
 
-export namespace csv {
+export namespace ccssvv {
 
 // portable 8-bytes-per-step scanner.
 class SwarScanner {
@@ -226,10 +226,12 @@ class SwarScanner {
   constexpr explicit SwarScanner(Dialect const& dialect) noexcept
       : delimiter_{dialect.delimiter},
         quote_{dialect.quote},
-        lanes_{detail::broadcast(dialect.delimiter),
-               detail::broadcast(dialect.quote),
-               detail::broadcast('\r'),
-               detail::broadcast('\n'),} {}
+        lanes_{
+          detail::broadcast(dialect.delimiter),
+          detail::broadcast(dialect.quote),
+          detail::broadcast('\r'),
+          detail::broadcast('\n'),
+        } {}
 
   [[nodiscard]] auto find_structural(
     std::string_view text, std::size_t from
@@ -449,7 +451,7 @@ using FileSource = StreamSource<std::ifstream>;
   return FileSource{std::move(file), options};
 }
 
-#ifdef CSV_HAS_MMAP
+#ifdef CCSSVV_HAS_MMAP
 
 class MmapSource {
  public:
@@ -581,16 +583,16 @@ using DefaultFileSource = FileSource;
 
 [[nodiscard]] inline auto open_source(std::filesystem::path const& path)
   -> std::expected<DefaultFileSource, ErrorCode> {
-#ifdef CSV_HAS_MMAP
+#ifdef CCSSVV_HAS_MMAP
   return MmapSource::map(path);
 #else
   return open_file(path);
 #endif
 }
 
-} // namespace csv
+} // namespace ccssvv
 
-export namespace csv {
+export namespace ccssvv {
 
 class Text {
  public:
@@ -820,9 +822,9 @@ static_assert(std::ranges::random_access_range<FieldRange>);
 static_assert(std::ranges::sized_range<FieldRange>);
 static_assert(std::ranges::view<FieldRange>);
 
-} // namespace csv
+} // namespace ccssvv
 
-namespace csv::detail {
+namespace ccssvv::detail {
 
 enum class Status : std::uint8_t {
   Record,
@@ -851,10 +853,12 @@ struct Step {
 [[nodiscard]] constexpr auto complete(
   std::size_t length, std::size_t consumed, std::size_t fields
 ) noexcept -> Step {
-  return {.status = Status::Record,
-          .length = length,
-          .consumed = consumed,
-          .fields = fields,};
+  return {
+    .status = Status::Record,
+    .length = length,
+    .consumed = consumed,
+    .fields = fields,
+  };
 }
 
 [[nodiscard]] constexpr auto failure(ErrorCode code, std::size_t where) noexcept
@@ -862,9 +866,9 @@ struct Step {
   return {.status = Status::Error, .code = code, .where = where};
 }
 
-} // namespace csv::detail
+} // namespace ccssvv::detail
 
-export namespace csv {
+export namespace ccssvv {
 
 class Record {
  public:
@@ -991,9 +995,11 @@ class Reader {
       }
       if(step.status == detail::Status::Error) {
         return report(
-          Error{.code = step.code,
-                .record = index_ + 1,
-                .offset = offset_ + step.where,}
+          Error{
+            .code = step.code,
+            .record = index_ + 1,
+            .offset = offset_ + step.where,
+          }
         );
       }
 
@@ -1011,11 +1017,13 @@ class Reader {
           width_ = step.fields;
         } else if(step.fields != width_) {
           return report(
-            Error{.code = ErrorCode::FieldCountMismatch,
-                  .record = index_,
-                  .offset = start,
-                  .expected = width_,
-                  .actual = step.fields,}
+            Error{
+              .code = ErrorCode::FieldCountMismatch,
+              .record = index_,
+              .offset = start,
+              .expected = width_,
+              .actual = step.fields,
+            }
           );
         }
       }
@@ -1231,9 +1239,9 @@ static_assert(Source<StreamSource<std::istream&>>);
 static_assert(Source<DefaultFileSource>);
 static_assert(std::ranges::input_range<Reader<ViewSource>>);
 
-} // namespace csv
+} // namespace ccssvv
 
-namespace csv::detail {
+namespace ccssvv::detail {
 
 struct ColumnPicker {
   std::size_t index{};
@@ -1246,15 +1254,17 @@ struct ColumnPicker {
     if(auto const field = item->field(index)) {
       return *field;
     }
-    return std::unexpected{Error{.code = ErrorCode::ColumnOutOfRange,
-                                 .record = item->index(),
-                                 .offset = item->offset(),}};
+    return std::unexpected{Error{
+      .code = ErrorCode::ColumnOutOfRange,
+      .record = item->index(),
+      .offset = item->offset(),
+    }};
   }
 };
 
-} // namespace csv::detail
+} // namespace ccssvv::detail
 
-export namespace csv {
+export namespace ccssvv {
 
 // lazy single column over the rows that remain in a reader.
 template <typename R>
@@ -1325,7 +1335,11 @@ class Table {
 
   [[nodiscard]] auto headers() const noexcept -> FieldRange {
     return FieldRange{FieldLayout{
-      header_, header_ends_.data(), width_, reader_.dialect().quote,}};
+      header_,
+      header_ends_.data(),
+      width_,
+      reader_.dialect().quote,
+    }};
   }
 
   [[nodiscard]] auto width() const noexcept -> std::size_t { return width_; }
@@ -1333,7 +1347,7 @@ class Table {
   [[nodiscard]] auto column_index(std::string_view name) const
     -> std::optional<std::size_t> {
     std::string scratch;
-    auto index {0UZ};
+    auto index{0UZ};
     for(auto const field : headers()) {
       if(field.unescape_into(scratch) == name) {
         return index;
@@ -1405,4 +1419,4 @@ using StreamTable = Table<FileSource>;
   return StreamTable::open(std::move(*source), dialect);
 }
 
-} // namespace csv
+} // namespace ccssvv
