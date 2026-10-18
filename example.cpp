@@ -7,7 +7,9 @@ constexpr std::string_view sample =
   "id,name,note\r\n"
   "1,Ada,\"likes \"\"engines\"\", and poetry\"\r\n"
   "2,Grace,\"multi\r\nline\"\r\n"
-  "3,Linus,\r\n";
+  "3,Linus,\r\n"
+  "4,Gordon,loves physics\r\n"
+  "5,Alyx,engineer\r\n";
 
 auto walk_records() -> void {
   using namespace ccssvv;

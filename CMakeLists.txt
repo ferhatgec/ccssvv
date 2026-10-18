@@ -16,7 +16,7 @@ endif ()
 
 project(ccssvv
   VERSION 1.0.0
-  DESCRIPTION "CSV parser module written in C++23"
+  DESCRIPTION "RFC4180-compliant multidialect CSV parser module in C++23"
   LANGUAGES CXX
 )
 
@@ -41,7 +41,7 @@ target_sources(ccssvv
   FILE_SET CXX_MODULES
   BASE_DIRS ${CMAKE_CURRENT_SOURCE_DIR}
   FILES
-  ${CMAKE_CURRENT_SOURCE_DIR}/csv.cppm
+  ${CMAKE_CURRENT_SOURCE_DIR}/ccssvv.cppm
 )
 
 if (CSV_ENABLE_NATIVE)
