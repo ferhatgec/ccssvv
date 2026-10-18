@@ -1,42 +1,42 @@
 import csv;
 import std;
 
-auto main() -> int {
-  constexpr auto dialect = csv::Dialect::rfc4180();
-  constexpr std::string_view raw = "id,name,note\r\n1,Ada,math\r\n2,Grace,compiler\r\n";
+namespace {
 
-  csv::ViewSource view_src{raw};
-  std::println("view initial size: {}", view_src.window().size());
-  view_src.consume(14);
-  std::println("view after consuming header: {}", view_src.window());
+constexpr std::string_view sample =
+  "id,name,note\r\n"
+  "1,Ada,\"likes \"\"engines\"\", and poetry\"\r\n"
+  "2,Grace,\"multi\r\nline\"\r\n"
+  "3,Linus,\r\n";
 
-  std::istringstream iss{std::string{raw}};
-  csv::StreamSource stream_src{
-    std::move(iss), csv::StreamOptions{.chunk_size = 16, .max_record_size = 64}
-  };
-
-  csv::DefaultScanner const scanner{dialect};
-  std::size_t total_consumed{};
-
-  for(;;) {
-    auto const win = stream_src.window();
-    if(win.empty()) {
-      auto const refilled = stream_src.refill();
-      if(!refilled) {
-        std::println("stream error: {}", csv::describe(refilled.error()));
-        return 1;
-      }
-      if(!*refilled) {
-        break;
-      }
-      continue;
+auto walk_records() -> void {
+  std::string scratch;
+  for(auto const& item : csv::parse(sample, csv::Dialect::rfc4180())) {
+    if(!item) {
+      std::println("error: {}", item.error().message());
+      return;
     }
-    auto const hit = scanner.find_structural(win, 0);
-    auto const step = (hit == csv::npos) ? win.size() : hit + 1;
-    stream_src.consume(step);
-    total_consumed += step;
+    for(auto const field : item->fields()) {
+      std::print("[{}]", field.unescape_into(scratch));
+    }
+    std::println("");
   }
+}
 
-  std::println("stream total consumed bytes: {} (expected {})", total_consumed, raw.size());
+auto collect_all() -> void {
+  auto reader = csv::parse(sample, csv::Dialect::rfc4180());
+  auto const rows = reader.collect();
+  if(!rows) {
+    std::println("error: {}", rows.error().message());
+    return;
+  }
+  std::println("collected {} records", rows->size());
+}
+
+} // namespace
+
+auto main() -> int {
+  walk_records();
+  collect_all();
   return 0;
 }

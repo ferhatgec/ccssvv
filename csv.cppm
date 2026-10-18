@@ -145,7 +145,6 @@ namespace csv::detail {
 inline constexpr std::uint64_t lane_ones = 0x0101010101010101ULL;
 inline constexpr std::uint64_t lane_low7 = 0x7F7F7F7F7F7F7F7FULL;
 
-namespace {
 [[nodiscard]] constexpr auto broadcast(char c) noexcept -> std::uint64_t {
   return lane_ones * static_cast<std::uint8_t>(c);
 }
@@ -165,11 +164,12 @@ namespace {
 }
 
 // only meaningful for Dialect::strict_text.
-[[nodiscard]] auto find_non_text(std::string_view text, bool quoted) noexcept
-  -> std::size_t {
+[[nodiscard]] inline auto find_non_text(
+  std::string_view text, bool quoted
+) noexcept -> std::size_t {
   auto const* const data = text.data();
   auto const size = text.size();
-  auto i = std::size_t{0};
+  auto i = 0UZ;
 
 #ifdef __AVX2__
   if(i + 32 <= size) {
@@ -215,7 +215,7 @@ namespace {
   }
   return npos;
 }
-} // namespace
+
 } // namespace csv::detail
 
 export namespace csv {
@@ -278,13 +278,8 @@ class SwarScanner {
 // the sub-32-byte tail falls back to SwarScanner so it never reads past "text"
 class Avx2Scanner {
  public:
-  explicit Avx2Scanner(Dialect const& dialect) noexcept
-      : quote_{dialect.quote},
-        delimiter_vec_{_mm256_set1_epi8(dialect.delimiter)},
-        quote_vec_{_mm256_set1_epi8(dialect.quote)},
-        cr_vec_{_mm256_set1_epi8('\r')},
-        lf_vec_{_mm256_set1_epi8('\n')},
-        tail_{dialect} {}
+  constexpr explicit Avx2Scanner(Dialect const& dialect) noexcept
+      : delimiter_{dialect.delimiter}, quote_{dialect.quote}, tail_{dialect} {}
 
   [[nodiscard]] auto find_structural(
     std::string_view text, std::size_t from
@@ -293,16 +288,20 @@ class Avx2Scanner {
     auto const size = text.size();
     auto i = from;
     if(i + 32 <= size) {
+      auto const delimiter_vec = _mm256_set1_epi8(delimiter_);
+      auto const quote_vec = _mm256_set1_epi8(quote_);
+      auto const cr_vec = _mm256_set1_epi8('\r');
+      auto const lf_vec = _mm256_set1_epi8('\n');
       do {
         auto const block =
           _mm256_loadu_si256(reinterpret_cast<__m256i const*>(data + i));
         auto const hits = _mm256_or_si256(
           _mm256_or_si256(
-            _mm256_cmpeq_epi8(block, delimiter_vec_),
-            _mm256_cmpeq_epi8(block, quote_vec_)
+            _mm256_cmpeq_epi8(block, delimiter_vec),
+            _mm256_cmpeq_epi8(block, quote_vec)
           ),
           _mm256_or_si256(
-            _mm256_cmpeq_epi8(block, cr_vec_), _mm256_cmpeq_epi8(block, lf_vec_)
+            _mm256_cmpeq_epi8(block, cr_vec), _mm256_cmpeq_epi8(block, lf_vec)
           )
         );
         auto const mask =
@@ -324,11 +323,8 @@ class Avx2Scanner {
   }
 
  private:
+  char delimiter_{};
   char quote_{};
-  __m256i delimiter_vec_{};
-  __m256i quote_vec_{};
-  __m256i cr_vec_{};
-  __m256i lf_vec_{};
   SwarScanner tail_;
 };
 
@@ -592,9 +588,646 @@ using DefaultFileSource = FileSource;
 #endif
 }
 
+} // namespace csv
+
+export namespace csv {
+
+class Text {
+ public:
+  Text(std::string_view borrowed) noexcept : storage_{borrowed} {}
+  explicit Text(std::string owned) noexcept : storage_{std::move(owned)} {}
+
+  [[nodiscard]] auto view() const noexcept -> std::string_view {
+    return std::visit(
+      [](auto const& value) noexcept -> std::string_view { return value; },
+      storage_
+    );
+  }
+
+  [[nodiscard]] auto owns() const noexcept -> bool {
+    return std::holds_alternative<std::string>(storage_);
+  }
+
+ private:
+  std::variant<std::string_view, std::string> storage_;
+};
+
+class Field {
+ public:
+  constexpr Field() noexcept = default;
+  constexpr Field(std::string_view raw, char quote) noexcept
+      : raw_{raw}, quote_{quote} {}
+
+  [[nodiscard]] constexpr auto raw() const noexcept -> std::string_view {
+    return raw_;
+  }
+
+  [[nodiscard]] constexpr auto quoted() const noexcept -> bool {
+    return !raw_.empty() && raw_.front() == quote_;
+  }
+
+  // content without the enclosing quotes; doubled quotes are left as-is.
+  [[nodiscard]] constexpr auto view() const noexcept -> std::string_view {
+    return quoted() ? raw_.substr(1, raw_.size() - 2) : raw_;
+  }
+
+  [[nodiscard]] constexpr auto needs_unescape() const noexcept -> bool {
+    return quoted() && view().contains(quote_);
+  }
+
+  // borrows when possible, owns only when doubled quotes have to be collapsed.
+  [[nodiscard]] auto text() const -> Text {
+    if(!needs_unescape()) {
+      return Text{view()};
+    }
+    return Text{to_string()};
+  }
+
+  // reuses "buffer"'s capacity; the result views either the field or "buffer".
+  [[nodiscard]] auto unescape_into(std::string& buffer) const
+    -> std::string_view {
+    if(!needs_unescape()) {
+      return view();
+    }
+    unescape(view(), quote_, buffer);
+    return buffer;
+  }
+
+  [[nodiscard]] auto to_string() const -> std::string {
+    if(!needs_unescape()) {
+      return std::string{view()};
+    }
+    std::string owned;
+    unescape(view(), quote_, owned);
+    return owned;
+  }
+
+ private:
+  static auto unescape(std::string_view content, char quote, std::string& out)
+    -> void {
+    out.clear();
+    out.reserve(content.size());
+    for(;;) {
+      auto const at = content.find(quote);
+      if(at == npos) {
+        out.append(content);
+        return;
+      }
+      out.append(content.substr(0, at + 1));
+      content.remove_prefix(std::min(at + 2, content.size()));
+    }
+  }
+
+  std::string_view raw_;
+  char quote_{'"'};
+};
+
+// where every field of one record starts and ends. "delimiters[k]" is the
+// offset (from the start of "record") of the delimiter that follows field k,
+// so field i is located in O(1). the reader fills the table while it validates.
+struct FieldLayout {
+  std::string_view record;
+  std::size_t const* delimiters{};
+  std::size_t count{};
+  char quote{'"'};
+
+  [[nodiscard]] constexpr auto at(std::size_t i) const noexcept -> Field {
+    auto const begin = i == 0UZ ? 0UZ : delimiters[i - 1] + 1UZ;
+    auto const end = i + 1 == count ? record.size() : delimiters[i];
+    return {record.substr(begin, end - begin), quote};
+  }
+};
+
+class FieldIterator {
+ public:
+  using value_type = Field;
+  using difference_type = std::ptrdiff_t;
+  using iterator_concept = std::random_access_iterator_tag;
+  using iterator_category = std::input_iterator_tag;
+
+  constexpr FieldIterator() noexcept = default;
+  constexpr FieldIterator(FieldLayout layout, std::size_t index) noexcept
+      : layout_{layout}, index_{index} {}
+
+  [[nodiscard]] constexpr auto operator*() const noexcept -> Field {
+    return layout_.at(index_);
+  }
+
+  [[nodiscard]] constexpr auto operator[](difference_type n) const noexcept
+    -> Field {
+    return layout_.at(offset_by(n));
+  }
+
+  constexpr auto operator++() noexcept -> FieldIterator& {
+    ++index_;
+    return *this;
+  }
+
+  constexpr auto operator++(int) noexcept -> FieldIterator {
+    auto previous = *this;
+    ++index_;
+    return previous;
+  }
+
+  constexpr auto operator--() noexcept -> FieldIterator& {
+    --index_;
+    return *this;
+  }
+
+  constexpr auto operator--(int) noexcept -> FieldIterator {
+    auto previous = *this;
+    --index_;
+    return previous;
+  }
+
+  constexpr auto operator+=(difference_type n) noexcept -> FieldIterator& {
+    index_ = offset_by(n);
+    return *this;
+  }
+
+  constexpr auto operator-=(difference_type n) noexcept -> FieldIterator& {
+    return *this += -n;
+  }
+
+  [[nodiscard]] friend constexpr auto operator+(
+    FieldIterator it, difference_type n
+  ) noexcept -> FieldIterator {
+    return it += n;
+  }
+
+  [[nodiscard]] friend constexpr auto operator+(
+    difference_type n, FieldIterator it
+  ) noexcept -> FieldIterator {
+    return it += n;
+  }
+
+  [[nodiscard]] friend constexpr auto operator-(
+    FieldIterator it, difference_type n
+  ) noexcept -> FieldIterator {
+    return it -= n;
+  }
+
+  [[nodiscard]] friend constexpr auto operator-(
+    FieldIterator const& a, FieldIterator const& b
+  ) noexcept -> difference_type {
+    return static_cast<difference_type>(a.index_) -
+           static_cast<difference_type>(b.index_);
+  }
+
+  [[nodiscard]] friend constexpr auto operator==(
+    FieldIterator const& a, FieldIterator const& b
+  ) noexcept -> bool {
+    return a.index_ == b.index_;
+  }
+
+  [[nodiscard]] friend constexpr auto operator<=>(
+    FieldIterator const& a, FieldIterator const& b
+  ) noexcept -> std::strong_ordering {
+    return a.index_ <=> b.index_;
+  }
+
+ private:
+  [[nodiscard]] constexpr auto offset_by(difference_type n) const noexcept
+    -> std::size_t {
+    return static_cast<std::size_t>(static_cast<difference_type>(index_) + n);
+  }
+
+  FieldLayout layout_{};
+  std::size_t index_{};
+};
+
+class FieldRange : public std::ranges::view_interface<FieldRange> {
+ public:
+  constexpr FieldRange() noexcept = default;
+  constexpr explicit FieldRange(FieldLayout layout) noexcept
+      : layout_{layout} {}
+
+  [[nodiscard]] constexpr auto begin() const noexcept -> FieldIterator {
+    return {layout_, 0};
+  }
+  [[nodiscard]] constexpr auto end() const noexcept -> FieldIterator {
+    return {layout_, layout_.count};
+  }
+  [[nodiscard]] constexpr auto size() const noexcept -> std::size_t {
+    return layout_.count;
+  }
+
+ private:
+  FieldLayout layout_{};
+};
+
+static_assert(std::ranges::random_access_range<FieldRange>);
+static_assert(std::ranges::sized_range<FieldRange>);
+static_assert(std::ranges::view<FieldRange>);
+
+} // namespace csv
+
+namespace csv::detail {
+
+enum class Status : std::uint8_t {
+  Record,
+  End,
+  NeedMore,
+  Error,
+};
+
+struct Step {
+  Status status{Status::NeedMore};
+  std::size_t length{};
+  std::size_t consumed{};
+  std::size_t fields{};
+  ErrorCode code{};
+  std::size_t where{};
+};
+
+[[nodiscard]] constexpr auto incomplete() noexcept -> Step {
+  return {.status = Status::NeedMore};
+}
+
+[[nodiscard]] constexpr auto finished() noexcept -> Step {
+  return {.status = Status::End};
+}
+
+[[nodiscard]] constexpr auto complete(
+  std::size_t length, std::size_t consumed, std::size_t fields
+) noexcept -> Step {
+  return {.status = Status::Record,
+          .length = length,
+          .consumed = consumed,
+          .fields = fields};
+}
+
+[[nodiscard]] constexpr auto failure(ErrorCode code, std::size_t where) noexcept
+  -> Step {
+  return {.status = Status::Error, .code = code, .where = where};
+}
+
+} // namespace csv::detail
+
+export namespace csv {
+
+class Record {
+ public:
+  constexpr Record() noexcept = default;
+
+  constexpr Record(
+    FieldLayout layout, std::size_t index, std::size_t offset
+  ) noexcept
+      : layout_{layout}, index_{index}, offset_{offset} {}
+
+  [[nodiscard]] constexpr auto raw() const noexcept -> std::string_view {
+    return layout_.record;
+  }
+  [[nodiscard]] constexpr auto size() const noexcept -> std::size_t {
+    return layout_.count;
+  }
+  [[nodiscard]] constexpr auto index() const noexcept -> std::size_t {
+    return index_;
+  }
+  [[nodiscard]] constexpr auto offset() const noexcept -> std::size_t {
+    return offset_;
+  }
+  [[nodiscard]] constexpr auto layout() const noexcept -> FieldLayout const& {
+    return layout_;
+  }
+  [[nodiscard]] constexpr auto fields() const noexcept -> FieldRange {
+    return FieldRange{layout_};
+  }
+
+  [[nodiscard]] constexpr auto field(std::size_t i) const noexcept
+    -> std::optional<Field> {
+    if(i >= layout_.count) {
+      return std::nullopt;
+    }
+    return layout_.at(i);
+  }
+
+ private:
+  FieldLayout layout_{};
+  std::size_t index_{};
+  std::size_t offset_{};
+};
+
+// single-pass input range of records. the record's field table lives in the
+// reader and is reused, so a Record (and its FieldRange) is valid until the
+// reader advances; the table only grows to the widest record seen.
+template <Source Src, Scanner Scan = DefaultScanner>
+class Reader {
+ public:
+  using Result = std::expected<Record, Error>;
+
+  class Iterator {
+   public:
+    using value_type = Result;
+    using difference_type = std::ptrdiff_t;
+
+    Iterator() = default;
+    explicit Iterator(Reader& reader) noexcept : reader_{&reader} {}
+
+    [[nodiscard]] auto operator*() const noexcept -> Result const& {
+      return *reader_->current_;
+    }
+
+    auto operator++() -> Iterator& {
+      reader_->advance();
+      return *this;
+    }
+
+    auto operator++(int) -> void { reader_->advance(); }
+
+    [[nodiscard]] friend auto operator==(
+      Iterator const& it, std::default_sentinel_t
+    ) noexcept -> bool {
+      return !it.reader_->still_has_value();
+    }
+
+   private:
+    Reader* reader_{};
+  };
+
+  explicit Reader(Src source, Dialect dialect = {})
+      : source_(std::move(source)), dialect_{dialect}, scanner_(dialect) {}
+
+  [[nodiscard]] auto begin() -> Iterator {
+    if(!started_) {
+      started_ = true;
+      advance();
+    }
+    return Iterator{*this};
+  }
+
+  [[nodiscard]] auto end() const noexcept -> std::default_sentinel_t {
+    return {};
+  }
+
+  // pull interface. field-count mismatches are reported but iteration may
+  // continue; every other error ends the stream.
+  [[nodiscard]] auto next() -> std::optional<Result> {
+    if(halted_) {
+      return std::nullopt;
+    }
+    if(!primed_) {
+      if(auto const failure = prime()) {
+        return report(*failure);
+      }
+    }
+    for(;;) {
+      auto window = source_.window();
+      auto const step = scan(window, drained_);
+
+      if(step.status == detail::Status::NeedMore) {
+        auto const more = source_.refill();
+        if(!more) {
+          return report(
+            Error{.code = more.error(), .record = index_ + 1, .offset = offset_}
+          );
+        }
+        drained_ = !*more;
+        continue;
+      }
+      if(step.status == detail::Status::End) {
+        halted_ = true;
+        return std::nullopt;
+      }
+      if(step.status == detail::Status::Error) {
+        return report(
+          Error{.code = step.code,
+                .record = index_ + 1,
+                .offset = offset_ + step.where}
+        );
+      }
+
+      auto const text = window.substr(0, step.length);
+      auto const start = offset_;
+      offset_ += step.consumed;
+      source_.consume(step.consumed);
+
+      if(dialect_.skip_empty_lines && step.length == 0) {
+        continue;
+      }
+      ++index_;
+      if(dialect_.uniform_width) {
+        if(width_ == 0) {
+          width_ = step.fields;
+        } else if(step.fields != width_) {
+          return report(
+            Error{.code = ErrorCode::FieldCountMismatch,
+                  .record = index_,
+                  .offset = start,
+                  .expected = width_,
+                  .actual = step.fields}
+          );
+        }
+      }
+      return Result{Record{
+        FieldLayout{text, delimiters_.data(), step.fields, dialect_.quote},
+        index_,
+        start}};
+    }
+  }
+
+  // materialises every remaining record with owned, unescaped fields.
+  [[nodiscard]] auto collect()
+    -> std::expected<std::vector<std::vector<std::string>>, Error> {
+    std::vector<std::vector<std::string>> rows;
+    for(auto const& item : *this) {
+      if(!item) {
+        return std::unexpected{item.error()};
+      }
+      auto& row = rows.emplace_back();
+      row.reserve(item->size());
+      for(auto const field : item->fields()) {
+        row.push_back(field.to_string());
+      }
+    }
+    return rows;
+  }
+
+  [[nodiscard]] auto dialect() const noexcept -> Dialect const& {
+    return dialect_;
+  }
+
+  [[nodiscard]] auto still_has_value() const noexcept -> bool {
+    return current_.has_value();
+  }
+
+ private:
+  auto advance() -> void { current_ = next(); }
+
+  [[nodiscard]] auto report(Error const& error) -> Result {
+    halted_ = error.code != ErrorCode::FieldCountMismatch;
+    return std::unexpected{error};
+  }
+
+  [[nodiscard]] auto prime() -> std::optional<Error> {
+    primed_ = true;
+    if(!dialect_.valid()) {
+      return Error{.code = ErrorCode::InvalidDialect};
+    }
+    if(!dialect_.skip_bom) {
+      return std::nullopt;
+    }
+    constexpr std::string_view bom{"\xEF\xBB\xBF"};
+    while(source_.window().size() < bom.size() && !drained_) {
+      auto const more = source_.refill();
+      if(!more) {
+        return Error{.code = more.error(), .record = 1, .offset = 0};
+      }
+      drained_ = !*more;
+    }
+    if(source_.window().starts_with(bom)) {
+      source_.consume(bom.size());
+      offset_ += bom.size();
+    }
+    return std::nullopt;
+  }
+
+  // validates one record and records where each field ends, without
+  // materialising any field. with "final_ == false" the window may end
+  // mid-record: the answer is then "NeedMore" whenever the bytes seen so
+  // far cannot decide the outcome.
+  [[nodiscard]] auto scan(std::string_view text, bool final_) -> detail::Step {
+    auto const size = text.size();
+    if(size == 0) {
+      return final_ ? detail::finished() : detail::incomplete();
+    }
+
+    auto const quote = dialect_.quote;
+    auto const delimiter = dialect_.delimiter;
+    auto const is_boundary = [&](char c) noexcept -> bool {
+      return c == delimiter || c == '\r' || c == '\n';
+    };
+
+    delimiters_.clear();
+    auto pos = std::size_t{0};
+
+    for(;;) {
+      if(pos < size && text[pos] == quote) {
+        auto const content = pos + 1;
+        pos = content;
+        for(;;) {
+          pos = scanner_.find_quote(text, pos);
+          if(pos == npos) {
+            return final_ ? detail::failure(
+                              ErrorCode::UnterminatedQuote, content - 1
+                            )
+                          : detail::incomplete();
+          }
+          if(pos + 1 == size && !final_) {
+            return detail::incomplete();
+          }
+          if(pos + 1 < size && text[pos + 1] == quote) {
+            pos += 2;
+            continue;
+          }
+          break;
+        }
+        if(dialect_.strict_text) {
+          auto const bad =
+            detail::find_non_text(text.substr(content, pos - content), true);
+          if(bad != npos) {
+            return detail::failure(ErrorCode::InvalidCharacter, content + bad);
+          }
+        }
+        ++pos;
+        if(pos < size && !is_boundary(text[pos])) {
+          return detail::failure(ErrorCode::InvalidCharacterAfterQuote, pos);
+        }
+      } else {
+        auto const begin = pos;
+        pos = scanner_.find_structural(text, pos);
+        auto const stop = pos == npos ? size : pos;
+        if(dialect_.strict_text) {
+          auto const bad =
+            detail::find_non_text(text.substr(begin, stop - begin), false);
+          if(bad != npos) {
+            return detail::failure(ErrorCode::InvalidCharacter, begin + bad);
+          }
+        }
+        if(pos == npos) {
+          pos = size;
+        } else if(text[pos] == quote) {
+          return detail::failure(ErrorCode::StrayQuote, pos);
+        }
+      }
+
+      auto const fields = delimiters_.size() + 1;
+      if(pos == size) {
+        return final_ ? detail::complete(size, size, fields)
+                      : detail::incomplete();
+      }
+      auto const c = text[pos];
+      if(c == delimiter) {
+        delimiters_.push_back(pos);
+        ++pos;
+        continue;
+      }
+      if(c == '\r') {
+        if(pos + 1 == size && !final_) {
+          return detail::incomplete();
+        }
+        if(pos + 1 < size && text[pos + 1] == '\n') {
+          return detail::complete(pos, pos + 2, fields);
+        }
+        if(dialect_.newline != Newline::Any) {
+          return detail::failure(ErrorCode::InvalidLineEnding, pos);
+        }
+        return detail::complete(pos, pos + 1, fields);
+      }
+      if(dialect_.newline == Newline::Crlf) {
+        return detail::failure(ErrorCode::InvalidLineEnding, pos);
+      }
+      return detail::complete(pos, pos + 1, fields);
+    }
+  }
+
+  Src source_;
+  Dialect dialect_;
+  Scan scanner_;
+  std::vector<std::size_t> delimiters_;
+  std::optional<Result> current_;
+  std::size_t offset_{};
+  std::size_t index_{};
+  std::size_t width_{};
+  bool primed_{};
+  bool started_{};
+  bool drained_{};
+  bool halted_{};
+};
+
+[[nodiscard]] inline auto parse(std::string_view text, Dialect dialect = {})
+  -> Reader<ViewSource> {
+  return Reader<ViewSource>{ViewSource{text}, dialect};
+}
+
+// memory-mapped where the platform supports it, buffered stream otherwise.
+[[nodiscard]] inline auto open_reader(
+  std::filesystem::path const& path, Dialect dialect = {}
+) -> std::expected<Reader<DefaultFileSource>, Error> {
+  auto source = open_source(path);
+  if(!source) {
+    return std::unexpected{Error{.code = source.error()}};
+  }
+  return Reader<DefaultFileSource>{std::move(*source), dialect};
+}
+
+// always streams through a bounded buffer, whatever the platform.
+[[nodiscard]] inline auto open_stream_reader(
+  std::filesystem::path const& path,
+  Dialect dialect = {},
+  StreamOptions options = {}
+) -> std::expected<Reader<FileSource>, Error> {
+  auto source = open_file(path, options);
+  if(!source) {
+    return std::unexpected{Error{.code = source.error()}};
+  }
+  return Reader<FileSource>{std::move(*source), dialect};
+}
+
 static_assert(Scanner<SwarScanner>);
 static_assert(Scanner<DefaultScanner>);
 static_assert(Source<ViewSource>);
 static_assert(Source<StreamSource<std::istream&>>);
 static_assert(Source<DefaultFileSource>);
+static_assert(std::ranges::input_range<Reader<ViewSource>>);
 } // namespace csv
