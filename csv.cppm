@@ -169,7 +169,7 @@ inline constexpr std::uint64_t lane_low7 = 0x7F7F7F7F7F7F7F7FULL;
 ) noexcept -> std::size_t {
   auto const* const data = text.data();
   auto const size = text.size();
-  auto i = 0UZ;
+  auto i {0UZ};
 
 #ifdef __AVX2__
   if(i + 32 <= size) {
@@ -229,7 +229,7 @@ class SwarScanner {
         lanes_{detail::broadcast(dialect.delimiter),
                detail::broadcast(dialect.quote),
                detail::broadcast('\r'),
-               detail::broadcast('\n')} {}
+               detail::broadcast('\n'),} {}
 
   [[nodiscard]] auto find_structural(
     std::string_view text, std::size_t from
@@ -363,8 +363,8 @@ class ViewSource {
 };
 
 struct StreamOptions {
-  std::size_t chunk_size{1U << 20};
-  std::size_t max_record_size{1U << 26};
+  std::size_t chunk_size{1UZ << 20UZ};
+  std::size_t max_record_size{1UZ << 26UZ};
 };
 
 // for inputs that cannot be mapped (pipes, sockets, std::cin). only the
@@ -692,7 +692,7 @@ struct FieldLayout {
   char quote{'"'};
 
   [[nodiscard]] constexpr auto at(std::size_t i) const noexcept -> Field {
-    auto const begin = i == 0UZ ? 0UZ : delimiters[i - 1] + 1UZ;
+    auto const begin = i == 0 ? 0UZ : delimiters[i - 1] + 1;
     auto const end = i + 1 == count ? record.size() : delimiters[i];
     return {record.substr(begin, end - begin), quote};
   }
@@ -854,7 +854,7 @@ struct Step {
   return {.status = Status::Record,
           .length = length,
           .consumed = consumed,
-          .fields = fields};
+          .fields = fields,};
 }
 
 [[nodiscard]] constexpr auto failure(ErrorCode code, std::size_t where) noexcept
@@ -972,7 +972,7 @@ class Reader {
       }
     }
     for(;;) {
-      auto window = source_.window();
+      auto const window = source_.window();
       auto const step = scan(window, drained_);
 
       if(step.status == detail::Status::NeedMore) {
@@ -993,7 +993,7 @@ class Reader {
         return report(
           Error{.code = step.code,
                 .record = index_ + 1,
-                .offset = offset_ + step.where}
+                .offset = offset_ + step.where,}
         );
       }
 
@@ -1015,7 +1015,7 @@ class Reader {
                   .record = index_,
                   .offset = start,
                   .expected = width_,
-                  .actual = step.fields}
+                  .actual = step.fields,}
           );
         }
       }
@@ -1099,7 +1099,7 @@ class Reader {
     };
 
     delimiters_.clear();
-    auto pos = std::size_t{0};
+    auto pos = 0UZ;
 
     for(;;) {
       if(pos < size && text[pos] == quote) {
@@ -1230,4 +1230,179 @@ static_assert(Source<ViewSource>);
 static_assert(Source<StreamSource<std::istream&>>);
 static_assert(Source<DefaultFileSource>);
 static_assert(std::ranges::input_range<Reader<ViewSource>>);
+
+} // namespace csv
+
+namespace csv::detail {
+
+struct ColumnPicker {
+  std::size_t index{};
+
+  [[nodiscard]] auto operator()(std::expected<Record, Error> const& item) const
+    -> std::expected<Field, Error> {
+    if(!item) {
+      return std::unexpected{item.error()};
+    }
+    if(auto const field = item->field(index)) {
+      return *field;
+    }
+    return std::unexpected{Error{.code = ErrorCode::ColumnOutOfRange,
+                                 .record = item->index(),
+                                 .offset = item->offset(),}};
+  }
+};
+
+} // namespace csv::detail
+
+export namespace csv {
+
+// lazy single column over the rows that remain in a reader.
+template <typename R>
+class Column : public std::ranges::view_base {
+  using View =
+    std::ranges::transform_view<std::ranges::ref_view<R>, detail::ColumnPicker>;
+
+ public:
+  Column(R& reader, std::size_t index)
+      : view_{std::ranges::ref_view<R>{reader}, detail::ColumnPicker{index}} {}
+
+  [[nodiscard]] auto begin() -> std::ranges::iterator_t<View> {
+    return view_.begin();
+  }
+  [[nodiscard]] auto end() -> std::ranges::sentinel_t<View> {
+    return view_.end();
+  }
+
+  [[nodiscard]] auto collect()
+    -> std::expected<std::vector<std::string>, Error> {
+    return collect([](Field field) -> std::string {
+      return field.to_string();
+    });
+  }
+
+  template <std::invocable<Field> Projection>
+  [[nodiscard]] auto collect(Projection projection) -> std::
+    expected<std::vector<std::invoke_result_t<Projection, Field>>, Error> {
+    std::vector<std::invoke_result_t<Projection, Field>> values;
+    for(auto const& item : *this) {
+      if(!item) {
+        return std::unexpected{item.error()};
+      }
+      values.push_back(std::invoke(projection, *item));
+    }
+    return values;
+  }
+
+ private:
+  View view_;
+};
+
+// reads only the header up front (one copy). rows stay in the source until
+// they are iterated, projected through "column()", or collected.
+template <Source Src, Scanner Scan = DefaultScanner>
+class Table {
+ public:
+  using reader_type = Reader<Src, Scan>;
+
+  [[nodiscard]] static auto open(Src source, Dialect dialect = {})
+    -> std::expected<Table, Error> {
+    reader_type reader{std::move(source), dialect};
+    auto first = reader.next();
+    if(!first) {
+      return std::unexpected{Error{.code = ErrorCode::MissingHeader}};
+    }
+    if(!*first) {
+      return std::unexpected{first->error()};
+    }
+    auto const& layout = (*first)->layout();
+    std::string header{layout.record};
+    std::vector<std::size_t> ends(
+      layout.delimiters, layout.delimiters + (layout.count - 1)
+    );
+    auto const width = layout.count;
+    return Table{std::move(reader), std::move(header), std::move(ends), width};
+  }
+
+  [[nodiscard]] auto headers() const noexcept -> FieldRange {
+    return FieldRange{FieldLayout{
+      header_, header_ends_.data(), width_, reader_.dialect().quote,}};
+  }
+
+  [[nodiscard]] auto width() const noexcept -> std::size_t { return width_; }
+
+  [[nodiscard]] auto column_index(std::string_view name) const
+    -> std::optional<std::size_t> {
+    std::string scratch;
+    auto index {0UZ};
+    for(auto const field : headers()) {
+      if(field.unescape_into(scratch) == name) {
+        return index;
+      }
+      ++index;
+    }
+    return std::nullopt;
+  }
+
+  [[nodiscard]] auto rows() noexcept -> reader_type& { return reader_; }
+
+  [[nodiscard]] auto column(std::size_t index)
+    -> std::expected<Column<reader_type>, Error> {
+    if(index >= width_) {
+      return std::unexpected{Error{.code = ErrorCode::ColumnOutOfRange}};
+    }
+    return Column<reader_type>{reader_, index};
+  }
+
+  [[nodiscard]] auto column(std::string_view name)
+    -> std::expected<Column<reader_type>, Error> {
+    auto const index = column_index(name);
+    if(!index) {
+      return std::unexpected{Error{.code = ErrorCode::UnknownColumn}};
+    }
+    return column(*index);
+  }
+
+ private:
+  Table(
+    reader_type reader,
+    std::string header,
+    std::vector<std::size_t> header_ends,
+    std::size_t width
+  )
+      : reader_{std::move(reader)},
+        header_{std::move(header)},
+        header_ends_{std::move(header_ends)},
+        width_{width} {}
+
+  reader_type reader_;
+  std::string header_;
+  std::vector<std::size_t> header_ends_;
+  std::size_t width_;
+};
+
+using FileTable = Table<DefaultFileSource>;
+using StreamTable = Table<FileSource>;
+
+[[nodiscard]] inline auto open_table(
+  std::filesystem::path const& path, Dialect dialect = {}
+) -> std::expected<FileTable, Error> {
+  auto source = open_source(path);
+  if(!source) {
+    return std::unexpected{Error{.code = source.error()}};
+  }
+  return FileTable::open(std::move(*source), dialect);
+}
+
+[[nodiscard]] inline auto open_stream_table(
+  std::filesystem::path const& path,
+  Dialect dialect = {},
+  StreamOptions options = {}
+) -> std::expected<StreamTable, Error> {
+  auto source = open_file(path, options);
+  if(!source) {
+    return std::unexpected{Error{.code = source.error()}};
+  }
+  return StreamTable::open(std::move(*source), dialect);
+}
+
 } // namespace csv
