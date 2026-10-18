@@ -3,6 +3,19 @@
 //
 module;
 
+#if defined(__unix__) || defined(__APPLE__)
+#  include <fcntl.h>
+#  include <sys/mman.h>
+#  include <sys/stat.h>
+#  include <unistd.h>
+#  define CSV_HAS_MMAP 1
+#elifdef _WIN32
+#  define WIN32_LEAN_AND_MEAN
+#  define NOMINMAX
+#  include <windows.h>
+#  define CSV_HAS_MMAP 1
+#endif
+
 #ifdef __AVX2__
 #  include <immintrin.h>
 #endif
@@ -14,46 +27,46 @@ import std;
 export namespace csv {
 
 enum class ErrorCode : std::uint8_t {
-  invalid_dialect,
-  unterminated_quote,
-  stray_quote,
-  invalid_character_after_quote,
-  invalid_character,
-  invalid_line_ending,
-  field_count_mismatch,
-  record_too_large,
-  io_failure,
-  missing_header,
-  unknown_column,
-  column_out_of_range,
+  InvalidDialect,
+  UnterminatedQuote,
+  StrayQuote,
+  InvalidCharacterAfterQuote,
+  InvalidCharacter,
+  InvalidLineEnding,
+  FieldCountMismatch,
+  RecordTooLarge,
+  IoFailure,
+  MissingHeader,
+  UnknownColumn,
+  ColumnOutOfRange,
 };
 
 [[nodiscard]] constexpr auto describe(ErrorCode code) noexcept
   -> std::string_view {
   switch(code) {
-    case ErrorCode::invalid_dialect:
+    case ErrorCode::InvalidDialect:
       return "delimiter and quote must differ and must not be CR or LF";
-    case ErrorCode::unterminated_quote:
+    case ErrorCode::UnterminatedQuote:
       return "quoted field is never closed";
-    case ErrorCode::stray_quote:
+    case ErrorCode::StrayQuote:
       return "quote inside an unquoted field";
-    case ErrorCode::invalid_character_after_quote:
+    case ErrorCode::InvalidCharacterAfterQuote:
       return "unexpected character after closing quote";
-    case ErrorCode::invalid_character:
+    case ErrorCode::InvalidCharacter:
       return "character not allowed by RFC 4180 TEXTDATA";
-    case ErrorCode::invalid_line_ending:
+    case ErrorCode::InvalidLineEnding:
       return "line ending not permitted by the dialect";
-    case ErrorCode::field_count_mismatch:
+    case ErrorCode::FieldCountMismatch:
       return "record has a different number of fields than the first record";
-    case ErrorCode::record_too_large:
+    case ErrorCode::RecordTooLarge:
       return "record exceeds the configured maximum size";
-    case ErrorCode::io_failure:
+    case ErrorCode::IoFailure:
       return "I/O failure";
-    case ErrorCode::missing_header:
+    case ErrorCode::MissingHeader:
       return "input is empty, no header record";
-    case ErrorCode::unknown_column:
+    case ErrorCode::UnknownColumn:
       return "no column with that name";
-    case ErrorCode::column_out_of_range:
+    case ErrorCode::ColumnOutOfRange:
       return "column index out of range";
   }
   return "unknown error";
@@ -67,7 +80,7 @@ struct Error {
   std::size_t actual{};
 
   [[nodiscard]] auto message() const -> std::string {
-    if(code == ErrorCode::field_count_mismatch) {
+    if(code == ErrorCode::FieldCountMismatch) {
       return std::format(
         "{} (expected {}, found {}; record {}, byte offset {})",
         describe(code),
@@ -84,15 +97,15 @@ struct Error {
 };
 
 enum class Newline : std::uint8_t {
-  crlf,
-  lf_or_crlf,
-  any,
+  Crlf,
+  LfOrCrlf,
+  Any,
 };
 
 struct Dialect {
   char delimiter{','};
   char quote{'"'};
-  Newline newline{Newline::lf_or_crlf};
+  Newline newline{Newline::LfOrCrlf};
   bool strict_text{false};
   bool uniform_width{true};
   bool skip_empty_lines{false};
@@ -106,7 +119,7 @@ struct Dialect {
   }
 
   [[nodiscard]] static constexpr auto rfc4180() noexcept -> Dialect {
-    return {.newline = Newline::crlf, .strict_text = true};
+    return {.newline = Newline::Crlf, .strict_text = true};
   }
 };
 
@@ -325,6 +338,263 @@ using DefaultScanner = Avx2Scanner;
 using DefaultScanner = SwarScanner;
 #endif
 
+// a Source exposes the not-yet-consumed bytes ("window"). views taken from the
+// window stay valid until the next call to "refill".
+template <typename S>
+concept Source = requires(S& source, std::size_t count) {
+  { std::as_const(source).window() } noexcept -> std::same_as<std::string_view>;
+  { source.consume(count) } noexcept -> std::same_as<void>;
+  { source.refill() } -> std::same_as<std::expected<bool, ErrorCode>>;
+};
+
+class ViewSource {
+ public:
+  constexpr explicit ViewSource(std::string_view text) noexcept : text_{text} {}
+
+  [[nodiscard]] constexpr auto window() const noexcept -> std::string_view {
+    return text_;
+  }
+  constexpr auto consume(std::size_t count) noexcept -> void {
+    text_.remove_prefix(count);
+  }
+  [[nodiscard]] constexpr auto refill() noexcept
+    -> std::expected<bool, ErrorCode> {
+    return false;
+  }
+
+ private:
+  std::string_view text_;
+};
+
+struct StreamOptions {
+  std::size_t chunk_size{1U << 20};
+  std::size_t max_record_size{1U << 26};
+};
+
+// for inputs that cannot be mapped (pipes, sockets, std::cin). only the
+// unfinished tail of the buffer is moved between refills, never the chunk.
+template <typename Stream>
+  requires std::derived_from<std::remove_reference_t<Stream>, std::istream>
+class StreamSource {
+ public:
+  explicit StreamSource(Stream stream, StreamOptions options = {})
+      : stream_(std::forward<Stream>(stream)),
+        limit_{std::max(options.max_record_size, options.chunk_size)},
+        capacity_{std::max<std::size_t>(options.chunk_size, 1)},
+        buffer_{std::make_unique_for_overwrite<char[]>(capacity_)} {}
+
+  [[nodiscard]] auto window() const noexcept -> std::string_view {
+    return {buffer_.get() + head_, tail_ - head_};
+  }
+
+  auto consume(std::size_t count) noexcept -> void { head_ += count; }
+
+  [[nodiscard]] auto refill() -> std::expected<bool, ErrorCode> {
+    if(eof_) {
+      return false;
+    }
+    if(head_ == tail_) {
+      head_ = tail_ = 0;
+    } else if(head_ != 0) {
+      std::memmove(buffer_.get(), buffer_.get() + head_, tail_ - head_);
+      tail_ -= head_;
+      head_ = 0;
+    }
+    if(tail_ == capacity_) {
+      if(capacity_ >= limit_) {
+        return std::unexpected{ErrorCode::RecordTooLarge};
+      }
+      grow(std::min(capacity_ * 2, limit_));
+    }
+    stream_.read(
+      buffer_.get() + tail_, static_cast<std::streamsize>(capacity_ - tail_)
+    );
+    auto const got = static_cast<std::size_t>(stream_.gcount());
+    tail_ += got;
+    if(stream_.bad() || (stream_.fail() && !stream_.eof())) {
+      return std::unexpected{ErrorCode::IoFailure};
+    }
+    eof_ = stream_.eof();
+    return got != 0;
+  }
+
+ private:
+  auto grow(std::size_t new_capacity) -> void {
+    auto bigger = std::make_unique_for_overwrite<char[]>(new_capacity);
+    std::memcpy(bigger.get(), buffer_.get(), tail_);
+    buffer_ = std::move(bigger);
+    capacity_ = new_capacity;
+  }
+
+  Stream stream_;
+  std::size_t limit_{};
+  std::size_t capacity_{};
+  std::unique_ptr<char[]> buffer_;
+  std::size_t head_{};
+  std::size_t tail_{};
+  bool eof_{};
+};
+
+template <typename S>
+StreamSource(S&&) -> StreamSource<S>;
+
+template <typename S>
+StreamSource(S&&, StreamOptions) -> StreamSource<S>;
+
+using FileSource = StreamSource<std::ifstream>;
+
+[[nodiscard]] inline auto open_file(
+  std::filesystem::path const& path, StreamOptions options = {}
+) -> std::expected<FileSource, ErrorCode> {
+  std::ifstream file{path, std::ios::binary};
+  if(!file) {
+    return std::unexpected{ErrorCode::IoFailure};
+  }
+  return FileSource{std::move(file), options};
+}
+
+#ifdef CSV_HAS_MMAP
+
+class MmapSource {
+ public:
+  [[nodiscard]] static auto map(std::filesystem::path const& path)
+    -> std::expected<MmapSource, ErrorCode> {
+#  ifdef _WIN32
+    HANDLE hFile = CreateFileW(
+      path.c_str(),
+      GENERIC_READ,
+      FILE_SHARE_READ,
+      NULL,
+      OPEN_EXISTING,
+      FILE_ATTRIBUTE_NORMAL,
+      NULL
+    );
+    if(hFile == INVALID_HANDLE_VALUE) {
+      return std::unexpected{ErrorCode::IoFailure};
+    }
+
+    LARGE_INTEGER size;
+    if(!GetFileSizeEx(hFile, &size)) {
+      CloseHandle(hFile);
+      return std::unexpected{ErrorCode::IoFailure};
+    }
+    if(size.QuadPart == 0) {
+      CloseHandle(hFile);
+      return MmapSource{};
+    }
+
+    HANDLE hMap = CreateFileMappingW(hFile, NULL, PAGE_READONLY, 0, 0, NULL);
+    CloseHandle(hFile);
+    if(!hMap) {
+      return std::unexpected{ErrorCode::IoFailure};
+    }
+
+    void* base = MapViewOfFile(hMap, FILE_MAP_READ, 0, 0, 0);
+    CloseHandle(hMap);
+    if(!base) {
+      return std::unexpected{ErrorCode::IoFailure};
+    }
+
+    return MmapSource{base, static_cast<std::size_t>(size.QuadPart)};
+#  else
+    auto const fd = ::open(path.c_str(), O_RDONLY | O_CLOEXEC);
+    if(fd < 0) {
+      return std::unexpected{ErrorCode::IoFailure};
+    }
+
+    struct stat info{};
+    if(::fstat(fd, &info) != 0 || !S_ISREG(info.st_mode)) {
+      ::close(fd);
+      return std::unexpected{ErrorCode::IoFailure};
+    }
+    auto const length = static_cast<std::size_t>(info.st_size);
+    if(length == 0) {
+      ::close(fd);
+      return MmapSource{};
+    }
+    void* const base = ::mmap(nullptr, length, PROT_READ, MAP_PRIVATE, fd, 0);
+    ::close(fd);
+    if(base == MAP_FAILED) {
+      return std::unexpected{ErrorCode::IoFailure};
+    }
+
+    ::madvise(base, length, MADV_SEQUENTIAL);
+    return MmapSource{base, length};
+#  endif
+  }
+
+  MmapSource(MmapSource const&) = delete;
+  auto operator=(MmapSource const&) -> MmapSource& = delete;
+
+  MmapSource(MmapSource&& other) noexcept
+      : base_{std::exchange(other.base_, nullptr)},
+        length_{std::exchange(other.length_, 0)},
+        text_{std::exchange(other.text_, {})} {}
+
+  auto operator=(MmapSource&& other) noexcept -> MmapSource& {
+    if(this != &other) {
+      release();
+      base_ = std::exchange(other.base_, nullptr);
+      length_ = std::exchange(other.length_, 0);
+      text_ = std::exchange(other.text_, {});
+    }
+    return *this;
+  }
+
+  ~MmapSource() { release(); }
+
+  [[nodiscard]] auto window() const noexcept -> std::string_view {
+    return text_;
+  }
+  auto consume(std::size_t count) noexcept -> void {
+    text_.remove_prefix(count);
+  }
+  [[nodiscard]] auto refill() noexcept -> std::expected<bool, ErrorCode> {
+    return false;
+  }
+
+ private:
+  MmapSource() noexcept = default;
+
+  MmapSource(void* base, std::size_t length) noexcept
+      : base_{base},
+        length_{length},
+        text_{static_cast<char const*>(base), length} {}
+
+  auto release() noexcept -> void {
+    if(base_ != nullptr) {
+#  ifdef _WIN32
+      UnmapViewOfFile(base_);
+#  else
+      ::munmap(base_, length_);
+#  endif
+      base_ = nullptr;
+    }
+  }
+
+  void* base_{};
+  std::size_t length_{};
+  std::string_view text_;
+};
+
+using DefaultFileSource = MmapSource;
+
+#else
+using DefaultFileSource = FileSource;
+#endif
+
+[[nodiscard]] inline auto open_source(std::filesystem::path const& path)
+  -> std::expected<DefaultFileSource, ErrorCode> {
+#ifdef CSV_HAS_MMAP
+  return MmapSource::map(path);
+#else
+  return open_file(path);
+#endif
+}
+
 static_assert(Scanner<SwarScanner>);
 static_assert(Scanner<DefaultScanner>);
+static_assert(Source<ViewSource>);
+static_assert(Source<StreamSource<std::istream&>>);
+static_assert(Source<DefaultFileSource>);
 } // namespace csv
