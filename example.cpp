@@ -74,6 +74,10 @@ auto sum_file_column(std::filesystem::path const& path) -> void {
 } // namespace
 
 auto main(int argc, char** argv) -> int {
+  using namespace ccssvv;
+  std::println(
+    "AVX2 support: {}", DefaultScanner::scanner_type() == ScannerType::AVX2
+  );
   walk_records();
   read_columns();
   if(argc > 1) {

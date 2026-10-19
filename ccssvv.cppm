@@ -25,6 +25,10 @@ export module ccssvv;
 import std;
 
 export namespace ccssvv {
+enum class ScannerType : std::uint8_t {
+  SWAR,
+  AVX2,
+};
 
 enum class ErrorCode : std::uint8_t {
   InvalidDialect,
@@ -264,6 +268,10 @@ class SwarScanner {
     return text.find(quote_, from);
   }
 
+  [[nodiscard]] static constexpr auto scanner_type() noexcept -> ScannerType {
+    return ScannerType::SWAR;
+  }
+
  private:
   [[nodiscard]] constexpr auto is_structural(char c) const noexcept -> bool {
     return c == delimiter_ || c == quote_ || c == '\r' || c == '\n';
@@ -322,6 +330,10 @@ class Avx2Scanner {
     std::string_view text, std::size_t from
   ) const noexcept -> std::size_t {
     return text.find(quote_, from);
+  }
+
+  [[nodiscard]] static constexpr auto scanner_type() noexcept -> ScannerType {
+    return ScannerType::AVX2;
   }
 
  private:

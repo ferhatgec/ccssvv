@@ -3,6 +3,7 @@
 ## RFC4180-compliant multidialect CSV parser module in C++23.
 
 ### Features:
+
 * Written as a single-file C++23 module.
 * RFC4180 compliance
 * Dialect support
@@ -11,6 +12,7 @@
 * Exception-free error handling.
 
 ### Example: Parsing In-Memory Strings:
+
 ```c++
 import ccssvv;
 import std;
@@ -38,6 +40,7 @@ auto main() -> int {
 ```
 
 ### Example: Memory Mapped File Reading
+
 ```c++
 import ccssvv;
 import std;
@@ -63,6 +66,7 @@ auto read_file(std::filesystem::path const& path) -> void {
 ```
 
 ### Example: Table/Column Projection
+
 ```c++
 import ccssvv;
 import std;
@@ -96,6 +100,7 @@ auto sum_prices(std::filesystem::path const& path) -> void {
 ```
 
 ### Example: Custom Dialects
+
 ```c++
 import ccssvv;
 
